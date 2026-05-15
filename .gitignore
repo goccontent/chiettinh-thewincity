@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+ChietTinh_DaTao/
+.DS_Store

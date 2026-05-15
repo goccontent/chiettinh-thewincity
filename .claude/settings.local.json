@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(python app_chiettinh.py)",
+      "Bash(pip install *)",
+      "Bash(python -c \"import streamlit, openpyxl; print\\('streamlit', streamlit.__version__\\)\")",
+      "Bash(streamlit run *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8501)",
+      "Bash(start http://localhost:8501)",
+      "Bash(git --version)",
+      "Bash(gh --version)",
+      "Bash(where.exe gh *)",
+      "Bash(powershell -c \"Get-Command gh -ErrorAction SilentlyContinue | Select-Object Source\")",
+      "Bash(git config *)",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ]
+  }
+}
