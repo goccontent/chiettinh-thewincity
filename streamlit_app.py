@@ -108,26 +108,44 @@ def fmt_vnd(n):
     return f"{n:,.0f}".replace(",", ".") + " ₫"
 
 
-def compute_breakdown(gia: int):
+DAU_TU_OPTIONS = {
+    "Không áp dụng": 0.0,
+    "Mua sỉ 2-5 SP (0,5%)": 0.005,
+    "Mua sỉ 6-10 SP (0,75%)": 0.0075,
+    "Mua sỉ 11-20 SP (1,5%)": 0.015,
+    "Mua sỉ ≥21 SP (3%)": 0.03,
+}
+PTTT_OPTIONS = {
+    "PTTT Chuẩn (2%)": 0.02,
+    "PTTT Nhanh 50% (5%)": 0.05,
+    "PTTT Nhanh 70% (7%)": 0.07,
+    "PTTT Nhanh 95% (10%)": 0.10,
+    "PTTT Vay (0% – có voucher 20tr)": 0.0,
+    "Không áp dụng": 0.0,
+}
+
+
+def compute_breakdown(gia: int, pol: dict):
     """Tái hiện công thức trong CHIETTINH.xlsx để preview."""
-    ck_phi_ma_dau = round(gia * 0.02)
-    ck_dau_tu = 0
-    after_2 = gia - ck_phi_ma_dau - ck_dau_tu
-    ck_pttt = round(after_2 * 0.02)
-    gia_truoc_vat = gia - ck_phi_ma_dau - ck_dau_tu - ck_pttt
-    # Giá đất được trừ: tạm tính theo công thức trong PL1-Chuẩn (sử dụng DT tim tường * 1,000,079)
-    # Bỏ qua trong preview - chỉ hiển thị các giá trị chính
+    e12 = pol["e12"]; e13 = pol["e13"]; e14 = pol["e14"]; c15 = pol["c15"]
+    c12 = round(gia * e12)
+    c13 = round((gia - c12) * e13)
+    c14 = round((gia - c12 - c13) * e14)
+    c15v = int(c15)
+    gia_truoc_vat = gia - c12 - c13 - c14 - c15v
     vat = round(gia_truoc_vat * 0.10)
     tong_co_vat = gia_truoc_vat + vat
     phi_bao_tri = round(gia_truoc_vat * 0.02)
     tong_cuoi = tong_co_vat + phi_bao_tri
     return {
         "Giá CĐT (trước VAT)": gia,
-        'CK "Phi Mã Đón Đầu" (2%)': -ck_phi_ma_dau,
-        "CK theo PTTT Chuẩn (2%)": -ck_pttt,
+        'CK "Phi Mã Đón Đầu"': -c12,
+        'CK "Đầu Tư Gia Tăng"': -c13,
+        "CK theo PTTT": -c14,
+        "CK khác (voucher)": -c15v,
         "Giá HĐMB trước VAT": gia_truoc_vat,
         "VAT (10%)": vat,
-        "Tổng giá HĐMB (gồm VAT)": tong_co_vat,
+        "Tổng HĐMB (gồm VAT)": tong_co_vat,
         "Phí bảo trì (2%)": phi_bao_tri,
         "TỔNG GIÁ TRỊ HỢP ĐỒNG": tong_cuoi,
     }
@@ -169,23 +187,20 @@ def try_recalc(path: Path) -> tuple[bool, str]:
     return False, last_err
 
 
-def fallback_compute_pl1a(wb, gia: int, dt_tim_tuong):
+def fallback_compute_pl1a(wb, gia: int, dt_tim_tuong, pol: dict):
     """Khi không có LibreOffice: tính trực tiếp và ghi đè value cho các ô chính
     để file mở ra đã thấy số ngay (không cần Excel recalc)."""
     pl1a = wb["PL1A"]
-    # Đọc tỉ lệ chiết khấu hiện có
-    def _num(c):
-        v = pl1a[c].value
-        return float(v) if isinstance(v, (int, float)) else 0.0
-    e12 = _num("E12"); e13 = _num("E13"); e14 = _num("E14")
+    e12 = pol["e12"]; e13 = pol["e13"]; e14 = pol["e14"]; c15 = int(pol["c15"])
     c12 = round(gia * e12)
     c13 = round((gia - c12) * e13)
     c14 = round((gia - c12 - c13) * e14)
-    # ô C15..C21 thường 0
-    c22 = gia - c12 - c13 - c14
+    c22 = gia - c12 - c13 - c14 - c15
     pl1a["C12"] = c12
     pl1a["C13"] = c13
     pl1a["C14"] = c14
+    if c15:
+        pl1a["C15"] = c15
     pl1a["C22"] = c22
 
     # PL1-Chuẩn (và các sheet phương thức): C30=C22, C31, C32, C33, C34, C35
@@ -217,7 +232,7 @@ def fallback_compute_pl1a(wb, gia: int, dt_tim_tuong):
         ws["C35"] = c22 + c32 + c34
 
 
-def build_chiettinh(product: dict, is_foreigner: bool, block: str) -> tuple[bytes, bool, str]:
+def build_chiettinh(product: dict, is_foreigner: bool, block: str, pol: dict) -> tuple[bytes, bool, str]:
     gia = product["gia_nn"] if is_foreigner else product["gia_vn"]
     if gia is None:
         raise ValueError("Mã sản phẩm này chưa có giá.")
@@ -235,6 +250,12 @@ def build_chiettinh(product: dict, is_foreigner: bool, block: str) -> tuple[byte
         if product["so_tang"] is not None and product["so_can"] is not None:
             pl1a["E7"] = f"CĂN SỐ {product['so_can']} TẦNG {product['so_tang']}"
         pl1a["C11"] = gia
+        # Ghi tỉ lệ chiết khấu vào các ô input của template
+        pl1a["E12"] = pol["e12"]
+        pl1a["E13"] = pol["e13"]
+        pl1a["E14"] = pol["e14"]
+        if pol["c15"]:
+            pl1a["C15"] = int(pol["c15"])
         if block:
             pl1a["C6"] = block
         elif product.get("thap"):
@@ -266,7 +287,7 @@ def build_chiettinh(product: dict, is_foreigner: bool, block: str) -> tuple[byte
         if not ok:
             # Không có LibreOffice → ghi đè value cho các ô quan trọng
             wb2 = openpyxl.load_workbook(out_path)
-            fallback_compute_pl1a(wb2, gia, product.get("dt_tim_tuong"))
+            fallback_compute_pl1a(wb2, gia, product.get("dt_tim_tuong"), pol)
             wb2.save(out_path)
         data = out_path.read_bytes()
         return data, ok, log
@@ -336,25 +357,65 @@ with col_r:
                 unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-st.markdown("### 3. Bảng tính nhanh (PTTT Chuẩn – tham khảo)")
+st.markdown("### 3. Chính sách / Chiết khấu áp dụng")
+st.caption("Bỏ chọn để ngưng áp dụng. Có thể điều chỉnh tỉ lệ tùy ý.")
+
+pc1, pc2 = st.columns(2)
+with pc1:
+    apply_phi_ma = st.checkbox('Chương trình "Phi Mã Đón Đầu"', value=True)
+    phi_ma_pct = st.number_input("Tỷ lệ CK Phi Mã Đón Đầu (%)", min_value=0.0, max_value=20.0,
+                                  value=2.0, step=0.1, disabled=not apply_phi_ma)
+
+    apply_dau_tu = st.checkbox('Chương trình "Đầu Tư Gia Tăng" (mua sỉ)', value=False)
+    dau_tu_label = st.selectbox("Mức mua sỉ", list(DAU_TU_OPTIONS.keys()),
+                                 index=0, disabled=not apply_dau_tu)
+
+with pc2:
+    apply_pttt = st.checkbox("Chiết khấu theo Phương thức thanh toán", value=True)
+    pttt_label = st.selectbox("Phương thức thanh toán",
+                               list(PTTT_OPTIONS.keys()), index=0, disabled=not apply_pttt)
+
+    is_vay = apply_pttt and pttt_label.startswith("PTTT Vay")
+    apply_voucher = st.checkbox("Voucher 20 triệu (chỉ áp dụng PTTT Vay)",
+                                 value=is_vay, disabled=not is_vay)
+    voucher_amt = st.number_input("Số tiền voucher (VNĐ)", min_value=0,
+                                   value=20_000_000 if apply_voucher else 0,
+                                   step=1_000_000, disabled=not apply_voucher)
+
+policies = {
+    "e12": (phi_ma_pct / 100.0) if apply_phi_ma else 0.0,
+    "e13": DAU_TU_OPTIONS[dau_tu_label] if apply_dau_tu else 0.0,
+    "e14": PTTT_OPTIONS[pttt_label] if apply_pttt else 0.0,
+    "c15": voucher_amt if (is_vay and apply_voucher) else 0,
+}
+
+with st.expander("Các chương trình quà tặng (không trừ vào giá)"):
+    st.checkbox('Cam kết dòng tiền thuê 3%/năm (24 tháng) – chỉ C1.3', value=False, key="cs_thue")
+    st.checkbox('Chương trình "Chìa Khóa Trao Tay – Xách Vali ở Ngay"', value=False, key="cs_chiakhoa")
+    st.checkbox('Chương trình "Nhà mới trao tay"', value=False, key="cs_nhamoi")
+    st.caption("Các chương trình này được ghi nhận trong hợp đồng nhưng KHÔNG trừ vào giá HĐMB.")
+
+st.markdown("### 4. Bảng tính nhanh")
 if gia:
-    bd = compute_breakdown(gia)
-    cols = st.columns(4)
+    bd = compute_breakdown(gia, policies)
+    cols = st.columns(5)
     items = list(bd.items())
     for i, (k, v) in enumerate(items):
-        with cols[i % 4]:
-            st.metric(k, fmt_vnd(abs(v)) if v >= 0 else f"−{fmt_vnd(abs(v))}")
-    st.caption("Các con số trên là tham khảo cho PTTT Chuẩn. File Excel xuất ra chứa đầy đủ 7 sheet PTTT.")
+        with cols[i % 5]:
+            label = k
+            display = fmt_vnd(abs(v)) if v >= 0 else f"−{fmt_vnd(abs(v))}"
+            st.metric(label, display)
+    st.caption("Cập nhật theo chính sách bạn chọn ở mục 3.")
 else:
     st.warning("Mã này chưa có giá trong file Giỏ hàng.")
 
-st.markdown("### 4. Xuất file Chiết Tính")
+st.markdown("### 5. Xuất file Chiết Tính")
 go = st.button("⚙️ Tạo file Chiết Tính", type="primary", use_container_width=True, disabled=gia is None)
 
 if go and gia:
     with st.spinner("Đang điền dữ liệu vào template và tính công thức..."):
         try:
-            data, recalc_ok, recalc_log = build_chiettinh(product, is_nn, block.strip())
+            data, recalc_ok, recalc_log = build_chiettinh(product, is_nn, block.strip(), policies)
         except Exception as e:
             st.error(f"Lỗi: {e}")
             st.stop()
