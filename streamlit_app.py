@@ -188,6 +188,13 @@ def build_chiettinh(product: dict, is_foreigner: bool, block: str) -> tuple[byte
             except Exception:
                 pass
 
+        # Bắt Excel tính lại toàn bộ công thức khi mở file
+        from openpyxl.workbook.properties import CalcProperties
+        wb.calculation = CalcProperties(calcId=191241, fullCalcOnLoad=True, calcMode="auto")
+        for sn in wb.sheetnames:
+            ws = wb[sn]
+            ws.force_formula_recalculation = True if hasattr(ws, "force_formula_recalculation") else None
+
         wb.save(out_path)
         ok = try_recalc(out_path)
         data = out_path.read_bytes()
