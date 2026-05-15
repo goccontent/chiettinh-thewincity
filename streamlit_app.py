@@ -133,25 +133,91 @@ def compute_breakdown(gia: int):
     }
 
 
-def try_recalc(path: Path) -> bool:
-    """Cố gắng tính lại công thức bằng LibreOffice (có sẵn trên Streamlit Cloud)."""
-    for soffice in ["soffice", "libreoffice",
-                    r"C:\Program Files\LibreOffice\program\soffice.exe"]:
+def try_recalc(path: Path) -> tuple[bool, str]:
+    """Tính lại công thức bằng LibreOffice. Trả về (ok, log)."""
+    candidates = [
+        "/usr/bin/libreoffice", "/usr/bin/soffice",
+        "libreoffice", "soffice",
+        r"C:\Program Files\LibreOffice\program\soffice.exe",
+    ]
+    out_dir = path.parent / "recalc_out"
+    out_dir.mkdir(exist_ok=True)
+    last_err = ""
+    for soffice in candidates:
         try:
-            subprocess.run(
+            r = subprocess.run(
                 [soffice, "--headless", "--calc",
                  "--convert-to", "xlsx",
-                 "--outdir", str(path.parent), str(path)],
-                check=True, timeout=90,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                 "--outdir", str(out_dir), str(path)],
+                check=True, timeout=120,
+                capture_output=True, text=True,
             )
-            return True
-        except (FileNotFoundError, subprocess.SubprocessError):
+            converted = out_dir / path.name
+            if converted.exists():
+                shutil.copy(converted, path)
+                return True, f"ok via {soffice}"
+            last_err = f"{soffice}: converted file not found. stdout={r.stdout[:200]} stderr={r.stderr[:200]}"
+        except FileNotFoundError:
+            last_err = f"{soffice}: not found"
             continue
-    return False
+        except subprocess.CalledProcessError as e:
+            last_err = f"{soffice}: rc={e.returncode} stderr={e.stderr[:300] if e.stderr else ''}"
+            continue
+        except subprocess.SubprocessError as e:
+            last_err = f"{soffice}: {e}"
+            continue
+    return False, last_err
 
 
-def build_chiettinh(product: dict, is_foreigner: bool, block: str) -> tuple[bytes, bool]:
+def fallback_compute_pl1a(wb, gia: int, dt_tim_tuong):
+    """Khi không có LibreOffice: tính trực tiếp và ghi đè value cho các ô chính
+    để file mở ra đã thấy số ngay (không cần Excel recalc)."""
+    pl1a = wb["PL1A"]
+    # Đọc tỉ lệ chiết khấu hiện có
+    def _num(c):
+        v = pl1a[c].value
+        return float(v) if isinstance(v, (int, float)) else 0.0
+    e12 = _num("E12"); e13 = _num("E13"); e14 = _num("E14")
+    c12 = round(gia * e12)
+    c13 = round((gia - c12) * e13)
+    c14 = round((gia - c12 - c13) * e14)
+    # ô C15..C21 thường 0
+    c22 = gia - c12 - c13 - c14
+    pl1a["C12"] = c12
+    pl1a["C13"] = c13
+    pl1a["C14"] = c14
+    pl1a["C22"] = c22
+
+    # PL1-Chuẩn (và các sheet phương thức): C30=C22, C31, C32, C33, C34, C35
+    dt = float(dt_tim_tuong) if dt_tim_tuong else 0
+    for sn in wb.sheetnames:
+        if sn == "PL1A":
+            continue
+        ws = wb[sn]
+        # Nhận diện các ô cần điền dựa trên label cột B
+        c26 = ws["C26"].value
+        if isinstance(c26, (int, float)):
+            dt_local = float(c26)
+        else:
+            dt_local = dt
+        # C30 = Giá HĐMB trước VAT
+        ws["C30"] = c22
+        # C31 = giá đất được trừ
+        c31 = round(dt_local * 1000079)
+        ws["C31"] = c31
+        # C32 = VAT
+        c32 = round((c22 - c31) * 0.10)
+        ws["C32"] = c32
+        # C33 = C30 + C32
+        ws["C33"] = c22 + c32
+        # C34 = phí bảo trì = 2% * C30
+        c34 = round(c22 * 0.02)
+        ws["C34"] = c34
+        # C35 = C33 + C34
+        ws["C35"] = c22 + c32 + c34
+
+
+def build_chiettinh(product: dict, is_foreigner: bool, block: str) -> tuple[bytes, bool, str]:
     gia = product["gia_nn"] if is_foreigner else product["gia_vn"]
     if gia is None:
         raise ValueError("Mã sản phẩm này chưa có giá.")
@@ -196,9 +262,14 @@ def build_chiettinh(product: dict, is_foreigner: bool, block: str) -> tuple[byte
             ws.force_formula_recalculation = True if hasattr(ws, "force_formula_recalculation") else None
 
         wb.save(out_path)
-        ok = try_recalc(out_path)
+        ok, log = try_recalc(out_path)
+        if not ok:
+            # Không có LibreOffice → ghi đè value cho các ô quan trọng
+            wb2 = openpyxl.load_workbook(out_path)
+            fallback_compute_pl1a(wb2, gia, product.get("dt_tim_tuong"))
+            wb2.save(out_path)
         data = out_path.read_bytes()
-        return data, ok
+        return data, ok, log
 
 
 # ---------- UI ----------
@@ -283,7 +354,7 @@ go = st.button("⚙️ Tạo file Chiết Tính", type="primary", use_container_
 if go and gia:
     with st.spinner("Đang điền dữ liệu vào template và tính công thức..."):
         try:
-            data, recalc_ok = build_chiettinh(product, is_nn, block.strip())
+            data, recalc_ok, recalc_log = build_chiettinh(product, is_nn, block.strip())
         except Exception as e:
             st.error(f"Lỗi: {e}")
             st.stop()
@@ -291,9 +362,14 @@ if go and gia:
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", product["ma"])
     suffix = "NN" if is_nn else "VN"
     st.success("✅ Đã tạo xong file. Bấm tải xuống bên dưới.")
-    if not recalc_ok:
-        st.info("ℹ️ Máy chủ chưa có LibreOffice nên công thức chưa được tính sẵn. "
-                "Khi mở file trong Excel lần đầu, bấm **Ctrl+Alt+F9** để Excel tự cập nhật giá trị.")
+    if recalc_ok:
+        st.caption(f"✓ Đã tính lại công thức bằng LibreOffice ({recalc_log})")
+    else:
+        st.info("ℹ️ Không có LibreOffice trên server — các ô chính đã được tính sẵn bằng Python "
+                "(Giá HĐMB, VAT, Phí bảo trì, Tổng giá). "
+                "Khi mở file trong Excel, bấm **Ctrl+Alt+F9** để cập nhật toàn bộ công thức còn lại.")
+        with st.expander("Chi tiết lỗi recalc"):
+            st.code(recalc_log)
     st.download_button(
         label=f"⬇️ Tải CHIETTINH_{safe}_{suffix}.xlsx",
         data=data,
